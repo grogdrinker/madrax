@@ -13,9 +13,8 @@
 #   limitations under the License.
 
 
-import torch,os
+import torch,os,pickle
 from madrax.sources.globalVariables import *
-import madrax.sources.parse_foldx_params as foldx_parser
 
 def generate_atom_hashing():
 	atomsOfEachresi = {
@@ -78,11 +77,8 @@ def generateTensorMappings(atom_hash,property_hashings,property_hashingsFake):
 	maxAtomNumber = max(maxAtomNumber)+1
 
 	path = os.path.dirname(os.path.abspath(__file__))
-	solvenergy_props = foldx_parser.read_hbond_params(path+"/../parameters/parameters_solvation.txt")
-	hbond_params = foldx_parser.read_hbond_params()
-	partners = foldx_parser.read_hbond_partners()
-	hydrogen_positions = foldx_parser.read_h_positions(path+"/../parameters/hbond_coords_params.txt")
-	freeOrb_positions = foldx_parser.read_FO_positions(path+"/../parameters/hbond_coords_params.txt")
+	
+	solvenergy_props, hbond_params, partners, hydrogen_positions, freeOrb_positions = pickle.load(open(path+"/../parameters/parameters.pickle","rb"))
 
 	### partners ###
 	partnersT = torch.full((maxAtomNumber,4),PADDING_INDEX)
@@ -154,7 +150,7 @@ def generateTensorMappings(atom_hash,property_hashings,property_hashingsFake):
 			if at == "O" or at == "OXT":
 				atom_properties[at_numb, property_hashings["other_params"]["close_atoms"]] = 0
 			elif at == "N" or at == "tN":
-				atom_properties[at_numb, property_hashings["other_params"]["close_atoms"]]  = 2  # 2 to keep O and N out? how to deal with O?
+				atom_properties[at_numb, property_hashings["other_params"]["close_atoms"]]  = 2 
 			elif at == "C":
 				atom_properties[at_numb, property_hashings["other_params"]["close_atoms"]]  = 2
 			elif at == "CA":
