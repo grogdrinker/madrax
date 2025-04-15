@@ -47,7 +47,7 @@ setup(
      package_dir={'madrax': 'madrax/','madrax.sources':'madrax/sources','madrax.mutate':'madrax/mutate','madrax.sources.kde':'madrax/sources/kde'},
      package_data={'madrax': ['parameters/**', '*.so',"parameters/weightsKDE/*"]},
 
-     python_requires=">=3.7,<=3.12",
+     python_requires=">=3.7,<3.13",
 
      install_requires=["torch","numpy","matplotlib"],
 
