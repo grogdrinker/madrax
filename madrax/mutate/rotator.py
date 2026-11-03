@@ -646,10 +646,6 @@ class RotateStruct():
 
 
 
-        axis_ind = torch.full((batch, nchain, nresi,nalter,ntorsions, 2), PADDING_INDEX,dtype=torch.long,device=dev)
-
-        affectedAt = torch.zeros(L,nalter, ntorsions, dtype=torch.bool, device=dev)
-
         if backbone_rotation:
 
             rotated_coords = self.rotateBackBone(rotated_coords, atom_description, rotation[..., :3], padding_mask)
@@ -660,26 +656,36 @@ class RotateStruct():
         resnum = atom_description[:, hashings.atom_description_hash["resnum"]].long()
         chain = atom_description[:, hashings.atom_description_hash["chain"]].long()
 
-        for torsion in self.torsion_axes.keys():
-            #testmask = resname.eq(12)# ile only
+        # torsion axes / affected atoms depend only on the topology, not on the rotation -> build once and reuse
+        key = (id(atom_description), id(alternativeMask), tuple(rotation.shape[:4]), str(dev))
+        cache = getattr(self, "_static_cache", None)
+        if cache is not None and cache[0] == key:
+            axis_ind, affectedAt = cache[1], cache[2]
+        else:
+            axis_ind = torch.full((batch, nchain, nresi,nalter,ntorsions, 2), PADDING_INDEX,dtype=torch.long,device=dev)
+            affectedAt = torch.zeros(L,nalter, ntorsions, dtype=torch.bool, device=dev)
+            for torsion in self.torsion_axes.keys():
+                #testmask = resname.eq(12)# ile only
 
-            for res in self.torsion_axes[torsion].keys():
-                at1 = self.torsion_axes[torsion][res][0]
-                at2 = self.torsion_axes[torsion][res][1]
-                for alt in range(nalter):
+                for res in self.torsion_axes[torsion].keys():
+                    at1 = self.torsion_axes[torsion][res][0]
+                    at2 = self.torsion_axes[torsion][res][1]
+                    for alt in range(nalter):
 
-                    mask1 = resname.eq(res) & aname.eq(at1) & alternativeMask[:,alt]
-                    mask2 = resname.eq(res) & aname.eq(at2) & alternativeMask[:,alt]
+                        mask1 = resname.eq(res) & aname.eq(at1) & alternativeMask[:,alt]
+                        mask2 = resname.eq(res) & aname.eq(at2) & alternativeMask[:,alt]
 
-                    axis_ind[:,:,:,alt, torsion,0] = axis_ind[:, :, :,alt, torsion, 0].index_put([batch_ind[mask1], chain[mask1], resnum[mask1]], atnumber[mask1], accumulate = False)
-                    axis_ind[:,:,:,alt, torsion,1] = axis_ind[:, :, :,alt, torsion, 1].index_put([batch_ind[mask2], chain[mask2], resnum[mask2]], atnumber[mask2], accumulate = False)
+                        axis_ind[:,:,:,alt, torsion,0] = axis_ind[:, :, :,alt, torsion, 0].index_put([batch_ind[mask1], chain[mask1], resnum[mask1]], atnumber[mask1], accumulate = False)
+                        axis_ind[:,:,:,alt, torsion,1] = axis_ind[:, :, :,alt, torsion, 1].index_put([batch_ind[mask2], chain[mask2], resnum[mask2]], atnumber[mask2], accumulate = False)
 
-                    for i, at in enumerate(self.torsion_axesAffectedAnglesHR[torsion][res]):
+                        for i, at in enumerate(self.torsion_axesAffectedAnglesHR[torsion][res]):
 
-                        affectedAt[: ,alt, torsion] += (aname.eq(at) & alternativeMask[:,alt])
+                            affectedAt[: ,alt, torsion] += (aname.eq(at) & alternativeMask[:,alt])
 
-                    pass
-                    #self.torsion_axesAffectedAngles[self.torsion_hash[i]][hashings.resi_hash[res]] = atnme.eq(self.hashing[res][atname])
+                        pass
+                        #self.torsion_axesAffectedAngles[self.torsion_hash[i]][hashings.resi_hash[res]] = atnme.eq(self.hashing[res][atname])
+
+            self._static_cache = (key, axis_ind, affectedAt, atom_description, alternativeMask)
         #calculating axis
         atomAxis_ind = axis_ind[batch_ind[padding_mask],chain[padding_mask], resnum[padding_mask]]#.permute(1, 2, 0).reshape(nrotating_atoms, 2, batch, L).permute(2, 3, 0, 1)
 
