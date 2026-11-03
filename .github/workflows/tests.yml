@@ -1,0 +1,61 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"   # nightly: slow tests + benchmarks
+
+jobs:
+  pr-gate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {python: "3.8",  torch: "1.12.1"}   # oldest supported torch
+          - {python: "3.10", torch: ""}         # latest
+          - {python: "3.12", torch: ""}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "${{ matrix.python }}"}
+      - name: install
+        run: |
+          pip install "torch${{ matrix.torch && format('=={0}', matrix.torch) || '' }}" --index-url https://download.pytorch.org/whl/cpu
+          pip install "numpy<2" matplotlib pytest
+      - name: tests (no slow, no gpu, no benchmark)
+        run: pytest -m "not slow and not gpu and not benchmark"
+
+  detect-on-master:
+    # every bug test must FAIL on upstream master (strict xfail); guards must pass there
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: {repository: grogdrinker/madrax, ref: main, path: upstream}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy matplotlib pytest
+      - run: MADRAX_PATH=$PWD/upstream pytest --target=master -m "not gpu and not benchmark"
+
+  nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy matplotlib pytest
+      - run: pytest -m "not gpu" -s
+      - uses: actions/upload-artifact@v4
+        with: {name: bench_results, path: bench_results.json}
+
+  # gpu:   needs a self-hosted CUDA runner; enable when one exists
+  #   runs-on: [self-hosted, gpu]
+  #   steps: ... pytest -m "gpu or benchmark"

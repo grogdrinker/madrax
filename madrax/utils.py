@@ -1,4 +1,4 @@
-import os,torch, string
+import os,torch, string, warnings
 import numpy as np
 from madrax.sources.globalVariables import *
 from madrax.sources import hashings
@@ -34,121 +34,80 @@ def parsePDB(PDBFile,keep_only_chains=None,bb_only=False):
 
 	"""
 
-	bbatoms = ["N", "CA", "C"]
-	ring_residues = ["PHE","TYR"]
-	R_C_atoms = ["CD1", "CE2"]
-	pdbNames = []
+	if os.path.isdir(PDBFile):
+		files = sorted(f for f in os.listdir(PDBFile) if f.lower().endswith(".pdb"))
+		paths = [os.path.join(PDBFile, f) for f in files]
+	else:
+		paths = [PDBFile]
+	coords, atomNames, pdbNames = [], [], []
+	for path in paths:
+		c, a = _parse_single_pdb(path, keep_only_chains, bb_only)
+		coords.append(torch.tensor(c))
+		atomNames.append(a)
+		pdbNames.append(os.path.splitext(os.path.basename(path))[0])
+	return torch.nn.utils.rnn.pad_sequence(coords, batch_first=True, padding_value=PADDING_INDEX), atomNames, pdbNames
 
-	if not os.path.isdir(PDBFile):
-		pdbNames=[PDBFile.replace(".pdb","")]
-		fil = PDBFile
-		atomNamesTMP = []
-		coordsTMP = []
-		RC_atoms_dict = {}
-		cont = -1
-		oldres = -999
 
-		for line in open(fil).readlines():
+def _parse_single_pdb(fil, keep_only_chains=None, bb_only=False):
+	"""Read the first model of a PDB file.
+
+	Alternate locations: for each residue the conformer (altloc label) with the highest total
+	occupancy is kept, ties going to the first label in the file, so a residue never mixes atoms
+	of two conformers. Atoms without an altloc label are always kept.
+	"""
+	bbatoms = ("N", "CA", "C")
+	records = []  # (chain, resnum, icode, resname, name, altloc, occupancy, xyz)
+	with open(fil) as fh:
+		for line in fh:
 			if line[:6] == "ENDMDL":
 				break
-			elif line[:4] == "ATOM":
-				if keep_only_chains is not None and (not line[21] in keep_only_chains):
-					continue
-				if bb_only and not line[12:16].strip() in bbatoms:
-					continue
-				if oldres != int(line[22:26]):
-					cont += 1
-					oldres = int(line[22:26])
-				if line[12:16].strip()[0] == "H":  # hydrogens are removed
-					continue
-				resnum = int(line[22:26])
-				altern_conformation = "0"
-				mutant = "0"
+			if line[:4] != "ATOM":
+				continue
+			chain = line[21]
+			if keep_only_chains is not None and chain not in keep_only_chains:
+				continue
+			name = line[12:16].strip()
+			if bb_only and name not in bbatoms:
+				continue
+			element = line[76:78].strip()
+			if element in ("H", "D") or (not element and name.lstrip("0123456789")[:1] == "H"):
+				continue
+			occ = line[54:60].strip()
+			records.append((chain, int(line[22:26]), line[26], line[17:20].strip(), name, line[16],
+							float(occ) if occ else 1.0,
+							[float(line[30:38]), float(line[38:46]), float(line[46:54])]))
 
-				atomNamesTMP += [line[17:20].strip() + "_" + str(resnum) + "_" + line[12:16].strip() + "_" + line[
-					21] + "_" + mutant + "_" + altern_conformation]
+	icodes = sorted({"%s:%d%s" % (r[0], r[1], r[2]) for r in records if r[2] != " "})
+	if icodes:
+		raise ValueError("%s: insertion codes are not supported (residues %s); renumber the structure so every "
+						 "residue in a chain has a unique number" % (fil, ", ".join(icodes[:5]) + (" ..." if len(icodes) > 5 else "")))
 
-				x = float(line[30:38])
-				y = float(line[38:46])
-				z = float(line[46:54])
+	# pick one conformer per residue
+	occupancy = {}
+	for chain, resnum, _, _, _, alt, occ, _ in records:
+		if alt != " ":
+			labels = occupancy.setdefault((chain, resnum), {})
+			labels[alt] = labels.get(alt, 0.0) + occ
+	chosen = {res: max(labels, key=lambda k: (labels[k], -list(labels).index(k))) for res, labels in occupancy.items()}
 
-				if line[17:20].strip() in ring_residues:
-					if not resnum in RC_atoms_dict:
-						name = line[17:20].strip() + "_" + str(resnum) + "_" + "RC" + "_" + line[
-							21] + "_" + mutant + "_" + altern_conformation
-						RC_atoms_dict[resnum] = ({}, name)
-					if line[12:16].strip() in R_C_atoms:
-						RC_atoms_dict[resnum][0][line[12:16].strip()] = [x, y, z]
-				coordsTMP += [[x, y, z]]
-
-		for r_c in RC_atoms_dict.keys():
-			if ("CD1" in RC_atoms_dict[r_c][0] and "CE2" in RC_atoms_dict[r_c][0]):
-				new_coords = [(RC_atoms_dict[r_c][0]["CD1"][0] + RC_atoms_dict[r_c][0]["CE2"][0]) / 2.0,
-							  (RC_atoms_dict[r_c][0]["CD1"][1] + RC_atoms_dict[r_c][0]["CE2"][1]) / 2.0,
-							  (RC_atoms_dict[r_c][0]["CD1"][2] + RC_atoms_dict[r_c][0]["CE2"][2]) / 2.0]
-				coordsTMP += [new_coords]
-				atomNamesTMP += [RC_atoms_dict[r_c][1]]
-
-		return torch.tensor(coordsTMP).unsqueeze(0),[atomNamesTMP]
-
-	else:
-		coords = []
-		atomNames = []
-
-		for c,fil in enumerate(sorted(os.listdir(PDBFile))):
-			#print(fil,c)
-			pdbNames += [fil.replace(".pdb", "")]
-			atomNamesTMP = []
-			coordsTMP = []
-			RC_atoms_dict = {}
-			cont = -1
-			oldres=-999
-			for line in open(PDBFile+"/"+fil).readlines():
-				if line[:6] == "ENDMDL":
-					break
-				elif line[:4] == "ATOM":
-					if keep_only_chains is not None and (not line[21] in keep_only_chains):
-						continue
-					if bb_only and not line[12:16].strip() in bbatoms:
-						continue
-					if oldres != int(line[22:26]):
-						cont += 1
-						oldres = int(line[22:26])
-					if line[12:16].strip()[0] == "H": # hydrogens are removed
-						continue
-					resnum = int(line[22:26])
-					altern_conformation = "0"
-					mutant = "0"
-
-					atomNamesTMP += [line[17:20].strip()+"_"+str(resnum)+"_"+line[12:16].strip()+"_"+line[21]+"_"+mutant+"_"+ altern_conformation]
-
-					x = float(line[30:38])
-					y = float(line[38:46])
-					z = float(line[46:54])
-
-
-					if line[17:20].strip() in ring_residues:
-						if not resnum in RC_atoms_dict:
-							name = line[17:20].strip()+"_"+str(resnum)+"_"+"RC"+"_"+line[21]+"_"+mutant+"_"+ altern_conformation
-							RC_atoms_dict[resnum] = ({ },name)
-						if line[12:16].strip() in R_C_atoms:
-							RC_atoms_dict[resnum][0][line[12:16].strip()] = [x,y,z]
-					coordsTMP+=[[x,y,z]]
-
-
-			for r_c in RC_atoms_dict.keys():
-				if  ("CD1" in RC_atoms_dict[r_c][0] and "CE2" in RC_atoms_dict[r_c][0]):
-					new_coords = [(RC_atoms_dict[r_c][0]["CD1"][0] + RC_atoms_dict[r_c][0]["CE2"][0] )/ 2.0,
-								  (RC_atoms_dict[r_c][0]["CD1"][1] + RC_atoms_dict[r_c][0]["CE2"][1]) / 2.0,
-								  (RC_atoms_dict[r_c][0]["CD1"][2] + RC_atoms_dict[r_c][0]["CE2"][2]) / 2.0]
-					coordsTMP += [new_coords]
-					atomNamesTMP += [RC_atoms_dict[r_c][1]]
-
-			coords+=[torch.tensor(coordsTMP)]
-			atomNames += [atomNamesTMP]
-
-
-		return torch.nn.utils.rnn.pad_sequence(coords, batch_first=True, padding_value=PADDING_INDEX),atomNames,pdbNames
+	atomNames, coords, resnames = [], [], {}
+	rings = {}  # (chain, resnum) -> ({atom: xyz}, name)
+	for chain, resnum, _, resname, name, alt, _, xyz in records:
+		if alt != " " and alt != chosen[(chain, resnum)]:
+			continue
+		if resnames.setdefault((chain, resnum), resname) != resname:
+			raise ValueError("%s: residue %s:%d has more than one residue type after altloc selection" % (fil, chain, resnum))
+		atomNames.append(f"{resname}_{resnum}_{name}_{chain}_0_0")
+		coords.append(xyz)
+		if resname in ("PHE", "TYR"):
+			d = rings.setdefault((chain, resnum), ({}, f"{resname}_{resnum}_RC_{chain}_0_0"))[0]
+			if name in ("CD1", "CE2"):
+				d[name] = xyz
+	for d, name in rings.values():
+		if "CD1" in d and "CE2" in d:
+			coords.append([(d["CD1"][k] + d["CE2"][k]) / 2.0 for k in range(3)])
+			atomNames.append(name)
+	return coords, atomNames
 
 def writepdb(coords,atnames, pdb_names=None, output_folder="outpdb/"):
 
@@ -195,7 +154,7 @@ def writepdb(coords,atnames, pdb_names=None, output_folder="outpdb/"):
 
 	coords = coords[atom_description[:, 0].long(), coordsIndexingAtom]
 
-	os.system("mkdir -p " + output_folder+"/")
+	os.makedirs(output_folder, exist_ok=True)
 
 	atname = atom_description[:, hashings.atom_description_hash["at_name"]]
 
@@ -248,7 +207,7 @@ def writepdb(coords,atnames, pdb_names=None, output_folder="outpdb/"):
 				name = n
 			else:
 				continue
-			f = open(output_folder + name + ".pdb", "w")
+			f = open(os.path.join(output_folder, name + ".pdb"), "w")
 			skip = ["RC","RE"]
 			skip_mask = torch.zeros(coords.shape[0])
 			for res in hashings.resi_hash.keys():

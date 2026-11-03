@@ -133,7 +133,7 @@ def generateTensorMappings(atom_hash,property_hashings,property_hashingsFake):
 				elif at in hbond_params["ooo"]:
 					at_numb = atom_hash[res][at]
 					atom_properties[at_numb,property_hashings["hbond_params"][prop]] = hbond_params["ooo"][at][prop]
-				elif at == "ND1H1S" or at == "ND1H2S" or at == "NE2H1S" or at == ["NE2H2S"]:
+				elif at == "ND1H1S" or at == "ND1H2S" or at == "NE2H1S" or at == "NE2H2S":
 					at_numb = atom_hash[res][at]
 					r = at[3:]
 					a = at[:3]

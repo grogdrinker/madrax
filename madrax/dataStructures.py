@@ -57,6 +57,7 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 
 	for protN, prot in enumerate(atName):
 		chainhashNum = 0
+		terminals = {}
 
 		atnToAtIndex[protN] = {}
 		indices_dict = {}
@@ -107,9 +108,11 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 			maxres = max(maxres,res_num[-1])
 			atom_counter += 1
 			if atom_counter<0:
-				raise("Overflow of the atom indexing! reduce the number of proteins in the batch or ask Gabriele to implement stuff in 64 bits (even if it is gonna slow down everything and Gabriele does not like it)")
+				raise OverflowError("Overflow of the atom indexing! reduce the number of proteins in the batch or ask Gabriele to implement stuff in 64 bits (even if it is gonna slow down everything and Gabriele does not like it)")
 
-			indices_dict[(chain_hashing[chainInd],resind)][a] = atn
+			if mut == "0" or a not in indices_dict[(chain_hashing[chainInd],resind)]:
+				indices_dict[(chain_hashing[chainInd],resind)][a] = atn
+			indices_dict.setdefault((chain_hashing[chainInd],resind,mut),{})[a] = atn
 
 			if not chain_hashing[chainInd] in terminals:
 				terminals[chain_hashing[chainInd]] = [current_atom_number,current_atom_number,resind,resind]
@@ -121,6 +124,12 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 					terminals[chain_hashing[chainInd]][2] = resind
 					terminals[chain_hashing[chainInd]][0] = current_atom_number
 			coordsIndexingAtom += [atn]
+
+		missing_ca = sorted({k[:2] for k, atoms in indices_dict.items() if "CA" not in atoms})
+		if missing_ca:
+			inv = {v: k for k, v in chain_hashing.items()}
+			raise ValueError("protein %d: residues without a CA atom (%s); MadraX needs a CA in every residue - remove or "
+							 "rebuild these residues" % (protN, ", ".join("%s:%d" % (inv[c], r) for c, r in missing_ca[:5]) + (" ..." if len(missing_ca) > 5 else "")))
 
 		### partner calculation! it can probably be implemented in tensorial form ###
 		for ch in terminals.keys():
@@ -150,12 +159,16 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 			partResNum2 = resind + partners[r][a][1][1]
 			partAtom2 = partners[r][a][1][0]
 
-			if (chain_hashing[chainInd], partResNum1) in indices_dict and partAtom1 in indices_dict[(chain_hashing[chainInd], partResNum1)]:
+			if (chain_hashing[chainInd], partResNum1, mut) in indices_dict and partAtom1 in indices_dict[(chain_hashing[chainInd], partResNum1, mut)]:
+				part1Ind = indices_dict[(chain_hashing[chainInd], partResNum1, mut)][partAtom1]
+			elif (chain_hashing[chainInd], partResNum1) in indices_dict and partAtom1 in indices_dict[(chain_hashing[chainInd], partResNum1)]:
 				part1Ind = indices_dict[(chain_hashing[chainInd], partResNum1)][partAtom1]
 			else:
 				part1Ind = PADDING_INDEX
 
-			if (chain_hashing[chainInd], partResNum2) in indices_dict and partAtom2 in indices_dict[(chain_hashing[chainInd], partResNum2)]:
+			if (chain_hashing[chainInd], partResNum2, mut) in indices_dict and partAtom2 in indices_dict[(chain_hashing[chainInd], partResNum2, mut)]:
+				part2Ind = indices_dict[(chain_hashing[chainInd], partResNum2, mut)][partAtom2]
+			elif (chain_hashing[chainInd], partResNum2) in indices_dict and partAtom2 in indices_dict[(chain_hashing[chainInd], partResNum2)]:
 				part2Ind = indices_dict[(chain_hashing[chainInd], partResNum2)][partAtom2]
 			else:
 				part2Ind = PADDING_INDEX
@@ -184,9 +197,11 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 
 	alternative_mask = build_altern_mask(atom_description)
 	coordsIndexingAtom = torch.tensor(coordsIndexingAtom,dtype=torch.long,device=device)
-	partnersIndexingAtom = torch.tensor(partnersTens,dtype=torch.long,device=device)
+	partnersIndexingAtom = torch.tensor([[int(a), int(b)] for a, b in partnersTens],dtype=torch.long,device=device)  # PADDING_INDEX is a float; old torch refuses mixed lists
 	atom_number = torch.tensor(atom_number, dtype=torch.long,device=device)
 
+	if res_num and min(res_num) < 0:
+		raise ValueError("negative residue numbers are not supported (they silently wrap around in the dense residue tensors); renumber the structure first")
 	angle_indices = torch.full((len(atName),maxchain +1 ,maxres+1,alternative_mask.shape[-1], 8, 4),int(PADDING_INDEX),device=device)
 
 

@@ -32,7 +32,7 @@ def add_hydrogen(r1, r2, r3, hpos):
 
     center = r1
 
-    padding_mask = (r1[...,0] != PADDING_INDEX) & (r2[...,0] != PADDING_INDEX) & (r2[...,0] != PADDING_INDEX) & (hpos[...,0] != PADDING_INDEX).sum(-1).bool()
+    padding_mask = (r1[...,0] != PADDING_INDEX) & (r2[...,0] != PADDING_INDEX) & (r3[...,0] != PADDING_INDEX) & (hpos[...,0] != PADDING_INDEX).sum(-1).bool()
 
     local_z_to_lab = (r2[padding_mask] - r1[padding_mask]) / torch.norm(r2[padding_mask] - r1[padding_mask],dim=-1).unsqueeze(-1).expand(-1,3)
     zx_vec = r3[padding_mask] - r1[padding_mask]  # )/np.linalg.norm(r3-r1)
