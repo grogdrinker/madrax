@@ -61,7 +61,7 @@ mutCoords = {'LEU': {'CB': [-0.7350809304657459, 1.2273079602053614, -0.48631027
 
 def mutate(coords,atName,mutationList):
     if len(mutationList) != len(coords):
-        raise("mutation list have to have the same length of atNames")
+        raise ValueError("mutation list have to have the same length of atNames")
     atNameNew =[]
     coordsNew = []
     for p,prot in enumerate(mutationList):
@@ -76,7 +76,7 @@ def mutate(coords,atName,mutationList):
         for i in range(len(atNameProt)):
             r,resind,a,chainInd,mut,alt_conf  = atNameProt[i].split("_")
 
-            if mut!=0:
+            if mut=="0":
 
                 if not chainInd in protdiz:
                     protdiz[chainInd] = {}
@@ -86,7 +86,7 @@ def mutate(coords,atName,mutationList):
 
             else:
 
-                maxmut = max(maxmut,mut)
+                maxmut = max(maxmut,int(mut))
 
         mutCoo = []
         mutAname = []
@@ -94,7 +94,7 @@ def mutate(coords,atName,mutationList):
         for m,mutList in enumerate(prot):
             for mut in mutList:
                 rnum,chain,to = mut.split("_")
-                fromAtoms = protdiz[chain][rnum]
+                fromAtoms = dict(protdiz[chain][rnum])  # copy: don't let one mutant's built atoms leak into the next
 
 
 
@@ -116,13 +116,13 @@ def mutate(coords,atName,mutationList):
                     if at in already_made_mut or at in bb_atoms:
 
                         #GLU_4_OE2_A_0_0
-                        mutAname += [to + "_" + rnum + "_"+at+"_"+chain+"_"+str(m +1)+"_0"]
+                        mutAname += [to + "_" + rnum + "_"+at+"_"+chain+"_"+str(maxmut+m+1)+"_0"]
                         mutCoo += [fromAtoms[at].unsqueeze(0)]
                     elif at == "RC":
                         newcoords = (fromAtoms["CD1"] + fromAtoms["CE2"] ) /2
 
                         mutCoo += [newcoords.unsqueeze(0)]
-                        mutAname += [to + "_" + rnum + "_"+at+"_"+chain+"_"+str(m+1)+"_0"]
+                        mutAname += [to + "_" + rnum + "_"+at+"_"+chain+"_"+str(maxmut+m+1)+"_0"]
 
                     else:
                         part1 = partners_Residue_builder[to][at][0]
@@ -140,7 +140,7 @@ def mutate(coords,atName,mutationList):
                         #newcoords = torch.tensor(parser.add_hydrogen(r1, r2, r3, atomPosition))
                         ### creating atom ###
                         fromAtoms[at] = newcoords.squeeze()
-                        mutAname += [to + "_" + rnum + "_"+at+"_"+chain+"_"+str(m+1)+"_0"]
+                        mutAname += [to + "_" + rnum + "_"+at+"_"+chain+"_"+str(maxmut+m+1)+"_0"]
                         mutCoo += [fromAtoms[at].unsqueeze(0)]
                 pass
         atNameNew += [atNameProt + mutAname]

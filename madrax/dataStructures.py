@@ -46,6 +46,7 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 	atnToAtIndex ={}
 	chain_hashingTot=[]
 	chain_hashing = {}
+	raw_names = []
 	for protN, prot in enumerate(atName):
 		for atn, atom in enumerate(prot):
 			if not atom.split("_")[3] in chain_hashingTot:
@@ -57,6 +58,7 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 
 	for protN, prot in enumerate(atName):
 		chainhashNum = 0
+		terminals = {}
 
 		atnToAtIndex[protN] = {}
 		indices_dict = {}
@@ -85,6 +87,7 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 
 			at = hashings.atom_hash[r][a]
 			at_name += [at]
+			raw_names += [(r, a)]
 			batch_index+=[protN]
 			res_num += [resind]
 
@@ -107,9 +110,11 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 			maxres = max(maxres,res_num[-1])
 			atom_counter += 1
 			if atom_counter<0:
-				raise("Overflow of the atom indexing! reduce the number of proteins in the batch or ask Gabriele to implement stuff in 64 bits (even if it is gonna slow down everything and Gabriele does not like it)")
+				raise OverflowError("Overflow of the atom indexing! reduce the number of proteins in the batch or ask Gabriele to implement stuff in 64 bits (even if it is gonna slow down everything and Gabriele does not like it)")
 
-			indices_dict[(chain_hashing[chainInd],resind)][a] = atn
+			if mut == "0" or a not in indices_dict[(chain_hashing[chainInd],resind)]:
+				indices_dict[(chain_hashing[chainInd],resind)][a] = atn
+			indices_dict.setdefault((chain_hashing[chainInd],resind,mut),{})[a] = atn
 
 			if not chain_hashing[chainInd] in terminals:
 				terminals[chain_hashing[chainInd]] = [current_atom_number,current_atom_number,resind,resind]
@@ -121,6 +126,12 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 					terminals[chain_hashing[chainInd]][2] = resind
 					terminals[chain_hashing[chainInd]][0] = current_atom_number
 			coordsIndexingAtom += [atn]
+
+		missing_ca = sorted({k[:2] for k, atoms in indices_dict.items() if "CA" not in atoms})
+		if missing_ca:
+			inv = {v: k for k, v in chain_hashing.items()}
+			raise ValueError("protein %d: residues without a CA atom (%s); MadraX needs a CA in every residue - remove or "
+							 "rebuild these residues" % (protN, ", ".join("%s:%d" % (inv[c], r) for c, r in missing_ca[:5]) + (" ..." if len(missing_ca) > 5 else "")))
 
 		### partner calculation! it can probably be implemented in tensorial form ###
 		for ch in terminals.keys():
@@ -150,12 +161,16 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 			partResNum2 = resind + partners[r][a][1][1]
 			partAtom2 = partners[r][a][1][0]
 
-			if (chain_hashing[chainInd], partResNum1) in indices_dict and partAtom1 in indices_dict[(chain_hashing[chainInd], partResNum1)]:
+			if (chain_hashing[chainInd], partResNum1, mut) in indices_dict and partAtom1 in indices_dict[(chain_hashing[chainInd], partResNum1, mut)]:
+				part1Ind = indices_dict[(chain_hashing[chainInd], partResNum1, mut)][partAtom1]
+			elif (chain_hashing[chainInd], partResNum1) in indices_dict and partAtom1 in indices_dict[(chain_hashing[chainInd], partResNum1)]:
 				part1Ind = indices_dict[(chain_hashing[chainInd], partResNum1)][partAtom1]
 			else:
 				part1Ind = PADDING_INDEX
 
-			if (chain_hashing[chainInd], partResNum2) in indices_dict and partAtom2 in indices_dict[(chain_hashing[chainInd], partResNum2)]:
+			if (chain_hashing[chainInd], partResNum2, mut) in indices_dict and partAtom2 in indices_dict[(chain_hashing[chainInd], partResNum2, mut)]:
+				part2Ind = indices_dict[(chain_hashing[chainInd], partResNum2, mut)][partAtom2]
+			elif (chain_hashing[chainInd], partResNum2) in indices_dict and partAtom2 in indices_dict[(chain_hashing[chainInd], partResNum2)]:
 				part2Ind = indices_dict[(chain_hashing[chainInd], partResNum2)][partAtom2]
 			else:
 				part2Ind = PADDING_INDEX
@@ -184,74 +199,13 @@ def create_info_tensors(atName,int_dtype=torch.short,device="cpu",verbose=False)
 
 	alternative_mask = build_altern_mask(atom_description)
 	coordsIndexingAtom = torch.tensor(coordsIndexingAtom,dtype=torch.long,device=device)
-	partnersIndexingAtom = torch.tensor(partnersTens,dtype=torch.long,device=device)
+	partnersIndexingAtom = torch.tensor([[int(a), int(b)] for a, b in partnersTens],dtype=torch.long,device=device)  # PADDING_INDEX is a float; old torch refuses mixed lists
 	atom_number = torch.tensor(atom_number, dtype=torch.long,device=device)
 
-	angle_indices = torch.full((len(atName),maxchain +1 ,maxres+1,alternative_mask.shape[-1], 8, 4),int(PADDING_INDEX),device=device)
+	if res_num and min(res_num) < 0:
+		raise ValueError("negative residue numbers are not supported (they silently wrap around in the dense residue tensors); renumber the structure first")
+	angle_indices = _build_angle_indices(len(atName), maxchain, maxres, alternative_mask, batch_index, chain, res_num, raw_names, device)
 
-
-	for protN, prot in enumerate(atName):
-
-		for atn, atom in enumerate(prot):
-			for alt in range(alternative_mask.shape[-1]):
-				r, resind, a, chainInd, mut, alt_conf = atom.split("_")
-				resind = int(resind)
-
-				if not r in hashings.resi_hash or not a in hashings.atom_hash[r]:
-					continue
-
-				if not alternative_mask[atnToAtIndex[protN][atn],alt]:
-
-					continue
-
-
-
-
-					#asd
-				#print("qui atn è deve tenere conto del fatto che potrebbero mancare robe del padding")
-				if a=="N":
-					#if protN==1 and chain_hashing[chainInd]==1 and resind==4:
-					#	asd
-
-					angle_indices[protN, chain_hashing[chainInd], resind,alt, torsionAngle_hashings["phi"], 1] = atnToAtIndex[protN][atn]
-
-					angle_indices[protN, chain_hashing[chainInd], resind, alt,torsionAngle_hashings["psi"], 0] = atnToAtIndex[protN][atn]
-					if resind-1>=0:#resind+1<angle_indices.shape[2]:
-
-						angle_indices[protN,chain_hashing[chainInd], resind-1, alt, torsionAngle_hashings["psi"], 3] = atnToAtIndex[protN][atn]
-
-						angle_indices[protN,chain_hashing[chainInd], resind-1, alt, torsionAngle_hashings["omega"], 2] = atnToAtIndex[protN][atn]
-
-
-				elif a=="C":
-					if resind+1<angle_indices.shape[2]:#resind-1>=0:
-
-						angle_indices[protN,chain_hashing[chainInd], resind+1,alt, torsionAngle_hashings["phi"], 0] = atnToAtIndex[protN][atn]
-
-					angle_indices[protN, chain_hashing[chainInd], resind,alt, torsionAngle_hashings["phi"], 3] = atnToAtIndex[protN][atn]
-					angle_indices[protN, chain_hashing[chainInd], resind,alt, torsionAngle_hashings["psi"], 2] = atnToAtIndex[protN][atn]
-
-					angle_indices[protN, chain_hashing[chainInd], resind,alt, torsionAngle_hashings["omega"], 1] =atnToAtIndex[protN][atn]
-
-
-				elif a=="CA":
-					angle_indices[protN, chain_hashing[chainInd], resind,alt, torsionAngle_hashings["phi"], 2] = atnToAtIndex[protN][atn]
-					angle_indices[protN, chain_hashing[chainInd], resind,alt, torsionAngle_hashings["psi"], 1] = atnToAtIndex[protN][atn]
-
-					angle_indices[protN, chain_hashing[chainInd], resind,alt, torsionAngle_hashings["omega"], 0] = atnToAtIndex[protN][atn]
-
-					if resind-1>=0:#resind+1<angle_indices.shape[2]:
-
-						angle_indices[protN, chain_hashing[chainInd], resind-1,alt, torsionAngle_hashings["omega"], 3] = atnToAtIndex[protN][atn]
-
-				if r in hashings.chi_angle_builder_hashing and a in hashings.chi_angle_builder_hashing[r]:
-					for sideAngle in hashings.chi_angle_builder_hashing[r][a]:
-						angle_indices[protN, chain_hashing[chainInd], resind,alt, torsionAngle_hashings[sideAngle[0]], sideAngle[1]] = atnToAtIndex[protN][atn]
-
-	#########################################
-
-	#secStruct = generate_sec_struct(coords=)
-	#getAngleIndices(atom_description)
 	return atom_number,atom_description,coordsIndexingAtom,partnersIndexingAtom,angle_indices,alternative_mask
 
 def getHelicalDipoles(atomPairs, hbondNet, atom_description, alternMask):
@@ -448,3 +402,44 @@ def build_altern_mask(atom_description):
 		altern_mask+=[alt_mask.unsqueeze(-1)]
 	altern_mask = torch.cat(altern_mask,dim=-1)
 	return altern_mask
+
+
+_TORSION = {"phi": 0, "psi": 1, "omega": 2, "chi1": 3, "chi2": 4, "chi3": 5, "chi4": 6, "chi5": 7}
+
+def _build_angle_indices(nprot, maxchain, maxres, alternative_mask, batch_index, chain, res_num, raw_names, device):
+	"""Vectorised version of the original per-atom/per-alternative loop (same result, last writer wins)."""
+	nalt = alternative_mask.shape[-1]
+	R = maxres + 1
+	A, P, C, Rs, T, S = [], [], [], [], [], []
+	for i, (r, a) in enumerate(raw_names):
+		p, c, ri = batch_index[i], chain[i], res_num[i]
+		roles = []
+		if a == "N":
+			roles += [(0, 0, 1), (0, 1, 0)]
+			if ri - 1 >= 0:
+				roles += [(-1, 1, 3), (-1, 2, 2)]
+		elif a == "C":
+			if ri + 1 < R:
+				roles += [(1, 0, 0)]
+			roles += [(0, 0, 3), (0, 1, 2), (0, 2, 1)]
+		elif a == "CA":
+			roles += [(0, 0, 2), (0, 1, 1), (0, 2, 0)]
+			if ri - 1 >= 0:
+				roles += [(-1, 2, 3)]
+		for chi, slot in hashings.chi_angle_builder_hashing.get(r, {}).get(a, ()):
+			roles += [(0, _TORSION[chi], slot)]
+		for off, t, sl in roles:
+			A.append(i); P.append(p); C.append(c); Rs.append(ri + off); T.append(t); S.append(sl)
+	angle_indices = torch.full((nprot, maxchain + 1, R, nalt, 8, 4), int(PADDING_INDEX), dtype=torch.long)
+	if not A:
+		return angle_indices.to(device)
+	A, P, C, Rs, T, S = (torch.tensor(v, dtype=torch.long) for v in (A, P, C, Rs, T, S))
+	am = alternative_mask.cpu()
+	e, alt = torch.nonzero(am[A], as_tuple=True)                     # (entry, alternative) pairs that exist
+	tgt = ((((P[e] * (maxchain + 1) + C[e]) * R + Rs[e]) * nalt + alt) * 8 + T[e]) * 4 + S[e]
+	order = A[e] * nalt + alt                                          # position in the original loop
+	flat = angle_indices.view(-1)
+	win = torch.full_like(flat, -1).scatter_reduce(0, tgt, order, reduce="amax")
+	keep = win[tgt] == order
+	flat[tgt[keep]] = A[e][keep]
+	return angle_indices.to(device)
