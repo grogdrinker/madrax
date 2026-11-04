@@ -6,6 +6,7 @@ from conftest import dataStructures, pad_batch
 from madrax.mutate import mutatingEngine
 from madrax.sources import hashings
 from madrax.sources.globalVariables import PADDING_INDEX
+from reference.dense import reference_angle_indices
 
 AD = hashings.atom_description_hash
 TN = {hashings.atom_hash[r]["tN"] for r in hashings.resi_hash}
@@ -62,3 +63,24 @@ def test_partners_stay_within_alternative(parse):
         # and WT atoms only ever use WT partners
         assert (alt[dst][alt[src] == 0] == 0).all()
 
+
+@pytest.mark.parametrize("case", ["small", "multichain", "batch", "scan"])
+def test_angle_indices_match_original_loop(parse, case):
+    """Differential: vectorised angle-index build == the original per-atom loop."""
+    if case == "batch":
+        _, names = pad_batch(parse("small"), parse("multichain"))
+    elif case == "scan":
+        _, names = _scan(parse)
+    else:
+        names = parse(case)[1]
+    info = dataStructures.create_info_tensors(names)
+    ref = reference_angle_indices(names, info[5], info[1])
+    assert info[4].shape == ref.shape
+    assert torch.equal(info[4].long(), ref.long())
+
+
+@pytest.mark.slow
+def test_angle_indices_match_original_loop_large(parse):
+    names = parse("large")[1]
+    info = dataStructures.create_info_tensors(names)
+    assert torch.equal(info[4].long(), reference_angle_indices(names, info[5], info[1]).long())
