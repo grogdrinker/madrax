@@ -49,7 +49,7 @@ setup(
 
      python_requires=">=3.7,<3.13",
 
-     install_requires=["torch","numpy","matplotlib"],
+     install_requires=["torch>=1.12","numpy","matplotlib"],
 
     classifiers=[
         "Programming Language :: Python :: 3",

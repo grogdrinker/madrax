@@ -48,7 +48,9 @@ def parsePDB(PDBFile,keep_only_chains=None,bb_only=False):
 		cont = -1
 		oldres = -999
 
-		for line in open(fil).readlines():
+		lines = open(fil).readlines()
+		chosen = _choose_altlocs(lines, fil, keep_only_chains)
+		for line in lines:
 			if line[:6] == "ENDMDL":
 				break
 			elif line[:4] == "ATOM":
@@ -60,6 +62,8 @@ def parsePDB(PDBFile,keep_only_chains=None,bb_only=False):
 					cont += 1
 					oldres = int(line[22:26])
 				if line[12:16].strip()[0] == "H":  # hydrogens are removed
+					continue
+				if line[16] != " " and line[16] != chosen[(line[21], int(line[22:26]))]:  # keep one conformer per residue
 					continue
 				resnum = int(line[22:26])
 				altern_conformation = "0"
@@ -73,12 +77,12 @@ def parsePDB(PDBFile,keep_only_chains=None,bb_only=False):
 				z = float(line[46:54])
 
 				if line[17:20].strip() in ring_residues:
-					if not resnum in RC_atoms_dict:
+					if not (line[21], resnum) in RC_atoms_dict:
 						name = line[17:20].strip() + "_" + str(resnum) + "_" + "RC" + "_" + line[
 							21] + "_" + mutant + "_" + altern_conformation
-						RC_atoms_dict[resnum] = ({}, name)
+						RC_atoms_dict[(line[21], resnum)] = ({}, name)
 					if line[12:16].strip() in R_C_atoms:
-						RC_atoms_dict[resnum][0][line[12:16].strip()] = [x, y, z]
+						RC_atoms_dict[(line[21], resnum)][0][line[12:16].strip()] = [x, y, z]
 				coordsTMP += [[x, y, z]]
 
 		for r_c in RC_atoms_dict.keys():
@@ -103,7 +107,9 @@ def parsePDB(PDBFile,keep_only_chains=None,bb_only=False):
 			RC_atoms_dict = {}
 			cont = -1
 			oldres=-999
-			for line in open(PDBFile+"/"+fil).readlines():
+			lines = open(PDBFile+"/"+fil).readlines()
+			chosen = _choose_altlocs(lines, fil, keep_only_chains)
+			for line in lines:
 				if line[:6] == "ENDMDL":
 					break
 				elif line[:4] == "ATOM":
@@ -115,6 +121,8 @@ def parsePDB(PDBFile,keep_only_chains=None,bb_only=False):
 						cont += 1
 						oldres = int(line[22:26])
 					if line[12:16].strip()[0] == "H": # hydrogens are removed
+						continue
+					if line[16] != " " and line[16] != chosen[(line[21], int(line[22:26]))]:  # keep one conformer per residue
 						continue
 					resnum = int(line[22:26])
 					altern_conformation = "0"
@@ -128,11 +136,11 @@ def parsePDB(PDBFile,keep_only_chains=None,bb_only=False):
 
 
 					if line[17:20].strip() in ring_residues:
-						if not resnum in RC_atoms_dict:
+						if not (line[21], resnum) in RC_atoms_dict:
 							name = line[17:20].strip()+"_"+str(resnum)+"_"+"RC"+"_"+line[21]+"_"+mutant+"_"+ altern_conformation
-							RC_atoms_dict[resnum] = ({ },name)
+							RC_atoms_dict[(line[21], resnum)] = ({ },name)
 						if line[12:16].strip() in R_C_atoms:
-							RC_atoms_dict[resnum][0][line[12:16].strip()] = [x,y,z]
+							RC_atoms_dict[(line[21], resnum)][0][line[12:16].strip()] = [x,y,z]
 					coordsTMP+=[[x,y,z]]
 
 
@@ -149,6 +157,41 @@ def parsePDB(PDBFile,keep_only_chains=None,bb_only=False):
 
 
 		return torch.nn.utils.rnn.pad_sequence(coords, batch_first=True, padding_value=PADDING_INDEX),atomNames,pdbNames
+
+def _choose_altlocs(lines, fil, keep_only_chains=None):
+	"""For each residue with alternate locations, the altloc label with the highest total occupancy
+	(ties: first label in the file). Insertion codes and residues whose kept atoms disagree on the
+	residue type are rejected."""
+	occupancy = {}
+	icodes = []
+	for line in lines:
+		if line[:6] == "ENDMDL":
+			break
+		if line[:4] != "ATOM" or (keep_only_chains is not None and not line[21] in keep_only_chains):
+			continue
+		res = (line[21], int(line[22:26]))
+		if line[26] != " ":
+			icodes += ["%s:%d%s" % (res[0], res[1], line[26])]
+		if line[16] != " ":
+			labels = occupancy.setdefault(res, {})
+			occ = line[54:60].strip()
+			labels[line[16]] = labels.get(line[16], 0.0) + (float(occ) if occ else 1.0)
+	if icodes:
+		raise ValueError("%s: insertion codes are not supported (residues %s); renumber the structure so every "
+						 "residue in a chain has a unique number" % (fil, ", ".join(icodes[:5]) + (" ..." if len(icodes) > 5 else "")))
+	chosen = {res: max(labels, key=lambda k: (labels[k], -list(labels).index(k))) for res, labels in occupancy.items()}
+	restype = {}
+	for line in lines:
+		if line[:6] == "ENDMDL":
+			break
+		if line[:4] != "ATOM" or (keep_only_chains is not None and not line[21] in keep_only_chains):
+			continue
+		res = (line[21], int(line[22:26]))
+		if line[16] != " " and line[16] != chosen[res]:
+			continue
+		if restype.setdefault(res, line[17:20].strip()) != line[17:20].strip():
+			raise ValueError("%s: residue %s:%d has more than one residue type after altloc selection" % (fil, res[0], res[1]))
+	return chosen
 
 def writepdb(coords,atnames, pdb_names=None, output_folder="outpdb/"):
 
@@ -195,7 +238,7 @@ def writepdb(coords,atnames, pdb_names=None, output_folder="outpdb/"):
 
 	coords = coords[atom_description[:, 0].long(), coordsIndexingAtom]
 
-	os.system("mkdir -p " + output_folder+"/")
+	os.makedirs(output_folder, exist_ok=True)
 
 	atname = atom_description[:, hashings.atom_description_hash["at_name"]]
 
@@ -248,7 +291,7 @@ def writepdb(coords,atnames, pdb_names=None, output_folder="outpdb/"):
 				name = n
 			else:
 				continue
-			f = open(output_folder + name + ".pdb", "w")
+			f = open(os.path.join(output_folder, name + ".pdb"), "w")
 			skip = ["RC","RE"]
 			skip_mask = torch.zeros(coords.shape[0])
 			for res in hashings.resi_hash.keys():
