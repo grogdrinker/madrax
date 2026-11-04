@@ -54,7 +54,7 @@ def optimize(model, coords, info_tensors, epochs=5,verbose=False,learning_rate=0
 								{'params': dummy_rotationSC, 'lr': learning_rate}
 								],amsgrad=True,eps=0.1)
 
-	scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10, verbose=False, threshold=0.0001, threshold_mode='rel', cooldown=0, min_lr=0, eps=1e-08)
+	scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10, threshold=0.0001, threshold_mode='rel', cooldown=0, min_lr=0, eps=1e-08)
 	#early_stopping = EarlyStopping(patience=100)
 
 	optimizer.zero_grad()

@@ -355,7 +355,7 @@ class RotateStruct():
 
 
         if atom_description[:, hashings.atom_description_hash["alternative"]].max() > 0:
-            raise("rotation backbone is only valid for a protein with no mutations. Run mutate with keep_WT==False")
+            raise ValueError("rotation backbone is only valid for a protein with no mutations. Run mutate with keep_WT==False")
 
         batch_ind = atom_description[:, hashings.atom_description_hash["batch"]].long()
         resnum = atom_description[:, hashings.atom_description_hash["resnum"]].long()
@@ -384,6 +384,7 @@ class RotateStruct():
                 CA += atName.eq(catom)
 
 
+        O = torch.isin(atName, torch.tensor(self.Oatoms + [hashings.atom_hash[r]["OXT"] for r in hashings.resi_hash], device=atName.device))
         rotated_coords = coords.clone()
 
 
@@ -435,7 +436,7 @@ class RotateStruct():
                 masked_unitary_axis = (atomAxis[1, :] - atomAxis[0, :]) / norm
                 masked_translation = atomAxis[0, :]
 
-                masked_rotation = rotation[targetBatch, targetChain, targetResnum,0, 2].unsqueeze(0)
+                masked_rotation = rotation[targetBatch, targetChain, targetResnum,0, 0].unsqueeze(0)
                 rotationMatrix = self.rotationMatrix(masked_rotation, masked_unitary_axis.unsqueeze(0)).expand(int(affected.sum()), 3, 3)
                 fat = masked_translation + (torch.bmm(rotationMatrix,
                                             (rotated_coords[targeting_mask][affected] - masked_translation.unsqueeze(0)).squeeze(1).unsqueeze(-1)).squeeze(-1))
@@ -450,13 +451,13 @@ class RotateStruct():
                 N_curr = rotated_coords[axis2]
                 C_prev = rotated_coords[axis1]
                 atomAxis = torch.cat([C_prev, N_curr], dim=0)
-                affected = resnum[targeting_mask].ge(targetResnum)
+                affected = resnum[targeting_mask].gt(targetResnum) | (resnum[targeting_mask].eq(targetResnum) & O[targeting_mask])
 
                 norm = torch.norm(atomAxis[1, :] - atomAxis[0, :], dim=-1).unsqueeze(-1)
                 masked_unitary_axis = (atomAxis[1, :] - atomAxis[0, :]) / norm
                 masked_translation = atomAxis[0, :]
 
-                masked_rotation = rotation[targetBatch, targetChain, targetResnum, 0, 2].unsqueeze(0)
+                masked_rotation = rotation[targetBatch, targetChain, targetResnum, 0, 1].unsqueeze(0)
                 rotationMatrix = self.rotationMatrix(masked_rotation, masked_unitary_axis.unsqueeze(0)).expand(
                     int(affected.sum()), 3, 3)
                 fat = masked_translation + (torch.bmm(rotationMatrix,

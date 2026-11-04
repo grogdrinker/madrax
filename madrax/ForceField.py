@@ -197,6 +197,29 @@ class ForceField(torch.nn.Module):
 
 		return torch.cat([atom_number_pw1.unsqueeze(-1),atom_number_pw2.unsqueeze(-1)],dim=-1)
 
+	def _bond_len_per_alternative(self, atom_description, coords, alternativeMask):
+		"""Peptide-bond term evaluated one alternative at a time.
+
+		The compiled BondLenConstrain mixes alternatives: with a LYS mutant present, the wild-type row of
+		that residue takes the mutant's value. On a single alternative it is exact, so each alternative is
+		scored as its own structure and the columns are stacked.
+		"""
+		nalt = alternativeMask.shape[-1]
+		if nalt == 1:
+			return self.bondLenConstraint(atom_description, coords, alternativeMask)
+		dims = [int(atom_description[:, hashings.atom_description_hash[k]].max()) + 1 for k in ("batch", "chain", "resnum")]
+		alt_col = hashings.atom_description_hash["alternative"]
+		cols = []
+		for k in range(nalt):
+			m = alternativeMask[:, k]
+			sub = atom_description[m].clone()
+			sub[:, alt_col] = 0
+			e = self.bondLenConstraint(sub, coords[m], torch.ones((int(m.sum()), 1), dtype=torch.bool, device=coords.device))[..., 0]
+			if list(e.shape) != dims:
+				e = torch.nn.functional.pad(e, [0, dims[2] - e.shape[2], 0, dims[1] - e.shape[1], 0, dims[0] - e.shape[0]])
+			cols.append(e)
+		return torch.stack(cols, dim=-1)
+
 	def forward(self,coordinates,info_tensors,verbose=False,return_network=False):
 
 		"""
@@ -385,7 +408,7 @@ class ForceField(torch.nn.Module):
 			print("Entropy Side Chain time:", time.time() - timeOld)
 
 		timeOld = time.time()
-		peptideBondConstraints = self.bondLenConstraint(atom_description,coords,alternativeMask)
+		peptideBondConstraints = self._bond_len_per_alternative(atom_description, coords, alternativeMask)
 		if verbose:
 			print("bond constrain time:", time.time() - timeOld)
 
