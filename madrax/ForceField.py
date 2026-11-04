@@ -117,6 +117,8 @@ class ForceField(torch.nn.Module):
 		self.acceptor = list(hbond_acceptor)
 		self.aromatic = list(hbond_ar)
 		self.backbone = list(bb_atoms)
+		self._donor_t = torch.tensor(self.donor)
+		self._accar_t = torch.tensor(self.acceptor + self.aromatic)
 
 		#### list of energies ####
 		self.solventAccessibiliry = SolventAccessibility.SolventAccessibility(dev=device,donor=self.donor, acceptor = self.acceptor, backbone_atoms = self.backbone)
@@ -131,71 +133,32 @@ class ForceField(torch.nn.Module):
 		self.bondLenConstraint = BondLenConstrain.BondLenConstrain(dev=device)
 		self.load_state_dict(torch.load(os.path.realpath(os.path.dirname(__file__))+"/parameters/final_model.weights",map_location=device))
 		
-	def getPairwiseRepresentation(self,coords,atom_number,atom_description,distance_threshold = 7):
+	def getPairwiseRepresentation(self, coords, atom_number, atom_description, distance_threshold=7, block=2048):
+		"""Same pairs/orientation/order as the original O(L^2)-memory version (reference copy in tests/reference/dense.py)."""
+		atom_number = atom_number[coords[atom_number, 0] != PADDING_INDEX]
 		L = atom_number.shape[0]
-		atom_number_pw1 = atom_number.unsqueeze(1).expand(L, L).reshape(-1)
-		atom_number_pw2 = atom_number.unsqueeze(0).expand(L, L).reshape(-1)
-
-		triMask = torch.triu(torch.ones((L, L), dtype=torch.bool, device=self.device), diagonal=1).reshape(-1)
-		padding_mask = ~(coords[atom_number_pw1 , 0].eq(PADDING_INDEX) | coords[atom_number_pw2 , 0].eq(PADDING_INDEX))
-		#print("implementa la alt mask")
-		altmask = True
-
-		atom_number_pw1 = atom_number_pw1[padding_mask]
-		atom_number_pw2 = atom_number_pw2[padding_mask]
-		triMask = triMask[padding_mask]
-		#full_mask = padding_mask
-		pairwise_atom_name1 = atom_description[:,hashings.atom_description_hash["at_name"]][atom_number_pw1.long()]
-		pairwise_atom_name2 = atom_description[:,hashings.atom_description_hash["at_name"]][atom_number_pw2.long()]
-
-		for k, donor_atom in enumerate(self.donor):
-			if k == 0:
-				donor_mask = pairwise_atom_name2.eq(donor_atom)
-				donor_maskOther = pairwise_atom_name1.eq(donor_atom)
-			else:
-				donor_mask += pairwise_atom_name2.eq(donor_atom)
-				donor_maskOther += pairwise_atom_name1.eq(donor_atom)
-
-		for k, acceptor_atom in enumerate(self.acceptor):
-			if k == 0:
-				acceptor_mask = pairwise_atom_name1.eq(acceptor_atom)
-				acceptor_maskOther = pairwise_atom_name2.eq(acceptor_atom)
-			else:
-				acceptor_mask += pairwise_atom_name1.eq(acceptor_atom)
-				acceptor_maskOther += pairwise_atom_name2.eq(acceptor_atom)
-
-		for k, aromatic_atom in enumerate(self.aromatic):
-			if k == 0:
-				aromatic_mask = pairwise_atom_name1.eq(aromatic_atom)
-				aromatic_maskOther = pairwise_atom_name2.eq(aromatic_atom)
-
-			else:
-				aromatic_mask += pairwise_atom_name1.eq(aromatic_atom)
-				aromatic_maskOther += pairwise_atom_name2.eq(aromatic_atom)
-
-
-		donor_acceptor_mask = (donor_mask & acceptor_mask)  # .unsqueeze(3)
-		donor_aromatic_mask = (donor_mask & aromatic_mask)  # .unsqueeze(3)
-		donor_acceptor_maskOther = (donor_maskOther & acceptor_maskOther)
-		donor_aromatic_maskOther = (donor_maskOther & aromatic_maskOther)
-		same_atom_mask = ~torch.eye(L, dtype=torch.bool, device=self.device).reshape(-1)[padding_mask]
-
-		hbond_or_triangular_mask = (
-										   (triMask & ((~donor_acceptor_mask) & (~donor_aromatic_mask)) & (
-													   (~donor_acceptor_maskOther) & (~donor_aromatic_maskOther))) |
-										   (triMask & (donor_acceptor_mask | donor_aromatic_mask)) |
-										   (~triMask & (
-											   ~(donor_acceptor_maskOther | donor_aromatic_maskOther)) & (
-														(donor_acceptor_mask) | (donor_aromatic_mask)))
-								   ) & same_atom_mask
-
-		atom_number_pw1 = atom_number_pw1[hbond_or_triangular_mask]
-		atom_number_pw2 = atom_number_pw2[hbond_or_triangular_mask]
-		longMask = torch.nn.functional.pairwise_distance(coords[atom_number_pw1.long()],coords[atom_number_pw2.long()]).le(distance_threshold)
-		atom_number_pw1 = atom_number_pw1[longMask]
-		atom_number_pw2 = atom_number_pw2[longMask]
-
-		return torch.cat([atom_number_pw1.unsqueeze(-1),atom_number_pw2.unsqueeze(-1)],dim=-1)
+		if L < 2:
+			return torch.zeros((0, 2), dtype=atom_number.dtype, device=coords.device)
+		names = atom_description[atom_number.long(), hashings.atom_description_hash["at_name"]]
+		donor = torch.isin(names, self._donor_t.to(names.device, names.dtype))
+		acc = torch.isin(names, self._accar_t.to(names.device, names.dtype))
+		x = coords[atom_number.long()]
+		I, J = [], []
+		with torch.no_grad():
+			for s in range(0, L, block):
+				e = min(s + block, L)
+				ii, jj = torch.nonzero(torch.cdist(x[s:e], x[s:]) <= distance_threshold + 1e-3, as_tuple=True)
+				ii = ii + s; jj = jj + s
+				k = jj > ii
+				I.append(ii[k]); J.append(jj[k])
+		i = torch.cat(I); j = torch.cat(J)
+		flip = (acc[j] & donor[i]) & ~(acc[i] & donor[j])
+		a = torch.where(flip, j, i); b = torch.where(flip, i, j)
+		pa, pb = atom_number[a], atom_number[b]
+		ok = torch.nn.functional.pairwise_distance(coords[pa.long()], coords[pb.long()]).le(distance_threshold)
+		a, b, pa, pb = a[ok], b[ok], pa[ok], pb[ok]
+		order = torch.argsort(a * L + b)
+		return torch.stack([pa[order], pb[order]], dim=-1)
 
 	def _bond_len_per_alternative(self, atom_description, coords, alternativeMask):
 		"""Peptide-bond term evaluated one alternative at a time.
